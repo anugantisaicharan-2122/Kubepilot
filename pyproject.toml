@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kubepilot"
+version = "0.1.0"
+description = "MCP server exposing Kubernetes operations as tools for AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sai Charan Anuganti" }]
+dependencies = [
+    "mcp>=2.0",
+    "kubernetes>=30",
+]
+
+[project.scripts]
+kubepilot = "kubepilot.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
