@@ -1,5 +1,7 @@
 # KubePilot
 
+![KubePilot — AI Agents for Kubernetes](assets/kubepilot-poster.webp)
+
 A **Model Context Protocol (MCP) server** that exposes Kubernetes cluster
 operations as tools for AI agents — built with Python, the official
 Kubernetes client, and the MCP Python SDK.
