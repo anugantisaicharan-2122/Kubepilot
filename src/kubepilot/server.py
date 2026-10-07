@@ -34,10 +34,11 @@ server = MCPServer(
     instructions=(
         "KubePilot exposes Kubernetes cluster operations as tools. "
         "Prefer the read-only tools (list_pods, get_pod_logs, "
-        "list_deployments, get_events, describe_resource) when investigating "
-        "an issue. Only call scale_deployment when the user explicitly asked "
-        "to change a workload's replica count, and always report the "
-        "before/after counts afterwards."
+        "list_deployments, get_events, describe_resource, rollout_status) "
+        "when investigating an issue. Only call scale_deployment, "
+        "restart_deployment or rollback_deployment when the user explicitly "
+        "asked to change a workload, and always report the before/after "
+        "state afterwards."
     ),
 )
 
@@ -301,6 +302,219 @@ def describe_resource(
         metadata = data.get("metadata") or {}
         metadata.pop("managed_fields", None)
         return _ok({"kind": kind, "name": name, "resource": data})
+    except Exception as exc:
+        return _api_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Rollout controls
+# ---------------------------------------------------------------------------
+
+def _deployment_revision(dep) -> int:
+    """Current revision of a deployment from its revision annotation."""
+    annotations = (dep.metadata.annotations or {})
+    try:
+        return int(annotations.get("deployment.kubernetes.io/revision", "0"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _previous_revision(dep, replica_sets):
+    """Find the newest ReplicaSet older than the deployment's revision.
+
+    Returns ``(revision, pod_template)`` where the template is a plain
+    dict ready to patch into the deployment, or ``None`` when there is
+    no earlier revision to roll back to.
+    """
+    current = _deployment_revision(dep)
+    best = None
+    for rs in replica_sets:
+        owned = any(
+            ref.uid == dep.metadata.uid and getattr(ref, "controller", False)
+            for ref in (rs.metadata.owner_references or [])
+        )
+        if not owned:
+            continue
+        rev = _deployment_revision(rs)
+        if rev < current and (best is None or rev > best[0]):
+            best = (rev, rs.spec.template)
+    if best is None:
+        return None
+    rev, template = best
+    if hasattr(template, "to_dict"):
+        template = template.to_dict()
+    return rev, template
+
+
+@server.tool()
+def rollout_status(
+    name: str, namespace: str = settings.default_namespace
+) -> str:
+    """Report a deployment's rollout progress (read-only).
+
+    Compares desired vs updated/ready/available replicas and surfaces the
+    deployment's conditions, with a simple verdict: "complete" when every
+    replica is updated, ready and available; "stalled" when the progress
+    deadline was exceeded; otherwise "in_progress". Start here before
+    deciding whether a restart or rollback is warranted.
+    """
+    if denied := _require_namespace(namespace):
+        return denied
+    try:
+        dep = k8s.apps_v1().read_namespaced_deployment(name, namespace)
+        spec, status = dep.spec, dep.status
+        desired = spec.replicas or 0
+        updated = status.updated_replicas or 0
+        ready = status.ready_replicas or 0
+        available = status.available_replicas or 0
+        conditions = [
+            {
+                "type": c.type,
+                "status": c.status,
+                "reason": c.reason,
+                "message": (c.message or "")[:300],
+            }
+            for c in (status.conditions or [])
+        ]
+        stalled = any(
+            c.get("type") == "Progressing"
+            and c.get("reason") == "ProgressDeadlineExceeded"
+            and c.get("status") == "True"
+            for c in conditions
+        )
+        if stalled:
+            verdict = "stalled"
+        elif updated == desired and ready == desired and available == desired:
+            verdict = "complete"
+        else:
+            verdict = "in_progress"
+        return _ok(
+            {
+                "deployment": name,
+                "namespace": namespace,
+                "revision": _deployment_revision(dep),
+                "replicas": {
+                    "desired": desired,
+                    "updated": updated,
+                    "ready": ready,
+                    "available": available,
+                    "unavailable": status.unavailable_replicas or 0,
+                },
+                "conditions": conditions,
+                "verdict": verdict,
+            }
+        )
+    except Exception as exc:
+        return _api_error(exc)
+
+
+@server.tool()
+def restart_deployment(
+    name: str, namespace: str = settings.default_namespace
+) -> str:
+    """Restart a deployment's rollout (MUTATING).
+
+    The equivalent of `kubectl rollout restart`: patches the pod template's
+    `kubectl.kubernetes.io/restartedAt` annotation so every pod is
+    recreated with the same image and config. Useful when pods are wedged
+    but the spec itself is fine. Refused when the server runs with
+    KUBEPILOT_READ_ONLY=true.
+    """
+    if settings.read_only:
+        return _err(
+            "refusing to restart: server is running in read-only mode "
+            "(KUBEPILOT_READ_ONLY=true)"
+        )
+    if denied := _require_namespace(namespace):
+        return denied
+    try:
+        apps = k8s.apps_v1()
+        dep = apps.read_namespaced_deployment(name, namespace)
+        restarted_at = datetime.now(timezone.utc).isoformat()
+        apps.patch_namespaced_deployment(
+            name,
+            namespace,
+            {
+                "spec": {
+                    "template": {
+                        "metadata": {
+                            "annotations": {
+                                "kubectl.kubernetes.io/restartedAt": restarted_at
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        log.info(
+            "restarted deployment %s/%s (revision %s)",
+            namespace,
+            name,
+            _deployment_revision(dep),
+        )
+        return _ok(
+            {
+                "deployment": name,
+                "namespace": namespace,
+                "restarted_at": restarted_at,
+            }
+        )
+    except Exception as exc:
+        return _api_error(exc)
+
+
+@server.tool()
+def rollback_deployment(
+    name: str, namespace: str = settings.default_namespace
+) -> str:
+    """Roll a deployment back to its previous revision (MUTATING).
+
+    Finds the newest ReplicaSet older than the deployment's current
+    revision and patches the deployment's pod template back to it — the
+    same thing `kubectl rollout undo` does. (The kubernetes Python client
+    no longer ships a dedicated rollback endpoint, so KubePilot walks the
+    revision history itself.) Fails cleanly when there is no earlier
+    revision. Refused when the server runs with KUBEPILOT_READ_ONLY=true.
+    """
+    if settings.read_only:
+        return _err(
+            "refusing to roll back: server is running in read-only mode "
+            "(KUBEPILOT_READ_ONLY=true)"
+        )
+    if denied := _require_namespace(namespace):
+        return denied
+    try:
+        apps = k8s.apps_v1()
+        dep = apps.read_namespaced_deployment(name, namespace)
+        current_rev = _deployment_revision(dep)
+        replica_sets = apps.list_namespaced_replica_set(
+            namespace=namespace
+        ).items
+        previous = _previous_revision(dep, replica_sets)
+        if previous is None:
+            return _err(
+                f"no earlier revision found for deployment '{name}' "
+                f"(current revision: {current_rev})"
+            )
+        target_rev, template = previous
+        apps.patch_namespaced_deployment(
+            name, namespace, {"spec": {"template": template}}
+        )
+        log.info(
+            "rolled back deployment %s/%s: revision %s -> %s",
+            namespace,
+            name,
+            current_rev,
+            target_rev,
+        )
+        return _ok(
+            {
+                "deployment": name,
+                "namespace": namespace,
+                "revision_before": current_rev,
+                "revision_after": target_rev,
+            }
+        )
     except Exception as exc:
         return _api_error(exc)
 

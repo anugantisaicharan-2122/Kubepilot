@@ -84,6 +84,9 @@ class TestToolRegistration(unittest.TestCase):
             "scale_deployment",
             "get_events",
             "describe_resource",
+            "rollout_status",
+            "restart_deployment",
+            "rollback_deployment",
         }
         self.assertEqual(names, expected)
         for tool in tools:

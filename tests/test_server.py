@@ -18,13 +18,19 @@ from kubepilot.server import (
     _age,
     _api_error,
     _err,
+    _event_time,
     _ok,
     _require_namespace,
     _summarize_deployment,
     _summarize_pod,
     describe_resource,
+    get_events,
     get_pod_logs,
+    list_deployments,
     list_pods,
+    restart_deployment,
+    rollback_deployment,
+    rollout_status,
     scale_deployment,
 )
 
@@ -298,6 +304,148 @@ class TestScaleDeployment(unittest.TestCase):
         )
 
 
+class TestListDeployments(unittest.TestCase):
+    @_with_settings()
+    def test_lists_and_summarizes_deployments(self):
+        fake_api = MagicMock()
+        fake_api.list_namespaced_deployment.return_value.items = [
+            _fake_deployment("web"),
+            _fake_deployment("api", replicas=1),
+        ]
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(list_deployments(namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["namespace"], "default")
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["deployments"][1]["name"], "api")
+        self.assertEqual(payload["deployments"][1]["replicas"]["desired"], 1)
+        fake_api.list_namespaced_deployment.assert_called_once_with(
+            namespace="default"
+        )
+
+    @_with_settings(KUBEPILOT_ALLOWED_NAMESPACES="default")
+    def test_denied_namespace_is_rejected(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(list_deployments(namespace="kube-system"))
+        self.assertFalse(payload["ok"])
+        fake_api.list_namespaced_deployment.assert_not_called()
+
+    @_with_settings()
+    def test_api_failure_becomes_error_envelope(self):
+        from kubernetes.client import ApiException
+
+        fake_api = MagicMock()
+        fake_api.list_namespaced_deployment.side_effect = ApiException(
+            status=503, reason="Unavailable"
+        )
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(list_deployments(namespace="default"))
+        self.assertFalse(payload["ok"])
+        self.assertIn("503", payload["error"])
+
+
+def _fake_event(name, minutes_ago, message="pulled image", count=1,
+                use_last_ts=True):
+    """Build a minimal fake Kubernetes event."""
+    created = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return SimpleNamespace(
+        last_timestamp=created if use_last_ts else None,
+        event_time=None,
+        type="Normal",
+        reason="Pulled",
+        involved_object=SimpleNamespace(kind="Pod", name=name),
+        message=message,
+        count=count,
+        metadata=SimpleNamespace(creation_timestamp=created),
+    )
+
+
+class TestEventTime(unittest.TestCase):
+    def test_prefers_last_timestamp(self):
+        event = _fake_event("web-0", 5)
+        self.assertEqual(_event_time(event), event.last_timestamp)
+
+    def test_falls_back_to_event_time(self):
+        event = _fake_event("web-0", 5, use_last_ts=False)
+        event.event_time = datetime.now(timezone.utc) - timedelta(minutes=3)
+        self.assertEqual(_event_time(event), event.event_time)
+
+    def test_falls_back_to_creation_timestamp(self):
+        event = _fake_event("web-0", 5, use_last_ts=False)
+        self.assertEqual(
+            _event_time(event), event.metadata.creation_timestamp
+        )
+
+
+class TestGetEvents(unittest.TestCase):
+    @_with_settings()
+    def test_returns_events_newest_first(self):
+        fake_api = MagicMock()
+        fake_api.list_namespaced_event.return_value.items = [
+            _fake_event("old", minutes_ago=60),
+            _fake_event("new", minutes_ago=2),
+        ]
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["namespace"], "default")
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(
+            [e["object"] for e in payload["events"]],
+            ["Pod/new", "Pod/old"],
+        )
+        first = payload["events"][0]
+        self.assertEqual(first["type"], "Normal")
+        self.assertEqual(first["reason"], "Pulled")
+        self.assertEqual(first["count"], 1)
+        self.assertEqual(first["message"], "pulled image")
+        self.assertTrue(first["last_seen"])
+
+    @_with_settings()
+    def test_limit_is_honored(self):
+        fake_api = MagicMock()
+        fake_api.list_namespaced_event.return_value.items = [
+            _fake_event(f"pod-{i}", minutes_ago=i) for i in range(3)
+        ]
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="default", limit=2))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(len(payload["events"]), 2)
+
+    @_with_settings()
+    def test_long_messages_are_truncated(self):
+        fake_api = MagicMock()
+        fake_api.list_namespaced_event.return_value.items = [
+            _fake_event("web-0", 1, message="m" * 400)
+        ]
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="default"))
+        self.assertEqual(len(payload["events"][0]["message"]), 300)
+
+    @_with_settings(KUBEPILOT_ALLOWED_NAMESPACES="default")
+    def test_denied_namespace_is_rejected(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="kube-system"))
+        self.assertFalse(payload["ok"])
+        fake_api.list_namespaced_event.assert_not_called()
+
+    @_with_settings()
+    def test_api_failure_becomes_error_envelope(self):
+        from kubernetes.client import ApiException
+
+        fake_api = MagicMock()
+        fake_api.list_namespaced_event.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="default"))
+        self.assertFalse(payload["ok"])
+        self.assertIn("403", payload["error"])
+
+
 class TestDescribeResource(unittest.TestCase):
     @_with_settings()
     def test_unsupported_kind_rejected(self):
@@ -328,6 +476,270 @@ class TestDescribeResource(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertNotIn("managed_fields", payload["resource"]["metadata"])
         self.assertEqual(payload["resource"]["status"]["phase"], "Ready")
+
+
+def _fake_deployment_with_revision(
+    name="web", replicas=3, revision=3, conditions=None, unavailable=0
+):
+    """Fake deployment carrying a revision annotation and conditions."""
+    dep = _fake_deployment(name, replicas)
+    dep.metadata.annotations = {
+        "deployment.kubernetes.io/revision": str(revision)
+    }
+    dep.metadata.uid = "dep-uid-123"
+    dep.status.conditions = conditions or []
+    dep.status.unavailable_replicas = unavailable
+    return dep
+
+
+def _fake_replicaset(name, revision, owner_uid="dep-uid-123", controller=True):
+    """Fake ReplicaSet owned by the fake deployment, template as plain dict."""
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=name,
+            uid=f"rs-{name}",
+            annotations={
+                "deployment.kubernetes.io/revision": str(revision)
+            },
+            owner_references=[
+                SimpleNamespace(uid=owner_uid, controller=controller)
+            ],
+        ),
+        spec=SimpleNamespace(
+            template={
+                "metadata": {"labels": {"app": name}},
+                "spec": {
+                    "containers": [
+                        {"name": "web", "image": f"registry/web:1.0.{revision}"}
+                    ]
+                },
+            }
+        ),
+    )
+
+
+def _progress_condition(reason="NewReplicaSetAvailable"):
+    return SimpleNamespace(
+        type="Progressing",
+        status="True",
+        reason=reason,
+        message="ReplicaSet updated",
+    )
+
+
+class TestRolloutStatus(unittest.TestCase):
+    @_with_settings()
+    def test_complete_rollout(self):
+        dep = _fake_deployment_with_revision(
+            revision=4, conditions=[_progress_condition()]
+        )
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(rollout_status("web", namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["verdict"], "complete")
+        self.assertEqual(payload["revision"], 4)
+        self.assertEqual(payload["replicas"]["desired"], 3)
+        self.assertEqual(payload["replicas"]["available"], 3)
+        self.assertEqual(len(payload["conditions"]), 1)
+
+    @_with_settings()
+    def test_in_progress_rollout(self):
+        dep = _fake_deployment_with_revision(revision=5)
+        dep.status.updated_replicas = 1
+        dep.status.ready_replicas = 1
+        dep.status.available_replicas = 1
+        dep.status.unavailable_replicas = 2
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(rollout_status("web", namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["verdict"], "in_progress")
+        self.assertEqual(payload["replicas"]["unavailable"], 2)
+
+    @_with_settings()
+    def test_stalled_rollout(self):
+        dep = _fake_deployment_with_revision(
+            revision=5,
+            conditions=[_progress_condition("ProgressDeadlineExceeded")],
+        )
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(rollout_status("web", namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["verdict"], "stalled")
+
+    @_with_settings(KUBEPILOT_READ_ONLY="true")
+    def test_read_only_does_not_block_status(self):
+        dep = _fake_deployment_with_revision()
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(rollout_status("web", namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["verdict"], "complete")
+
+    @_with_settings(KUBEPILOT_ALLOWED_NAMESPACES="default")
+    def test_denied_namespace_is_rejected(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(rollout_status("web", namespace="kube-system"))
+        self.assertFalse(payload["ok"])
+        fake_api.read_namespaced_deployment.assert_not_called()
+
+    @_with_settings()
+    def test_api_failure_becomes_error_envelope(self):
+        from kubernetes.client import ApiException
+
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(rollout_status("web", namespace="default"))
+        self.assertFalse(payload["ok"])
+        self.assertIn("404", payload["error"])
+
+
+class TestRestartDeployment(unittest.TestCase):
+    @_with_settings(KUBEPILOT_READ_ONLY="true")
+    def test_read_only_refuses_to_restart(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                restart_deployment("web", namespace="default")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("read-only", payload["error"])
+        fake_api.patch_namespaced_deployment.assert_not_called()
+
+    @_with_settings(KUBEPILOT_ALLOWED_NAMESPACES="default")
+    def test_denied_namespace_is_rejected(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                restart_deployment("web", namespace="kube-system")
+            )
+        self.assertFalse(payload["ok"])
+        fake_api.patch_namespaced_deployment.assert_not_called()
+
+    @_with_settings()
+    def test_successful_restart_patches_annotation(self):
+        dep = _fake_deployment_with_revision(revision=4)
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                restart_deployment("web", namespace="default")
+            )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["deployment"], "web")
+        self.assertTrue(payload["restarted_at"])
+        _, kwargs_or_args = fake_api.patch_namespaced_deployment.call_args
+        body = fake_api.patch_namespaced_deployment.call_args[0][2]
+        restarted = body["spec"]["template"]["metadata"]["annotations"][
+            "kubectl.kubernetes.io/restartedAt"
+        ]
+        self.assertTrue(restarted)
+
+    @_with_settings()
+    def test_api_failure_becomes_error_envelope(self):
+        from kubernetes.client import ApiException
+
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = (
+            _fake_deployment_with_revision()
+        )
+        fake_api.patch_namespaced_deployment.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                restart_deployment("web", namespace="default")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("403", payload["error"])
+
+
+class TestRollbackDeployment(unittest.TestCase):
+    @_with_settings(KUBEPILOT_READ_ONLY="true")
+    def test_read_only_refuses_to_roll_back(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                rollback_deployment("web", namespace="default")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("read-only", payload["error"])
+        fake_api.patch_namespaced_deployment.assert_not_called()
+
+    @_with_settings(KUBEPILOT_ALLOWED_NAMESPACES="default")
+    def test_denied_namespace_is_rejected(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                rollback_deployment("web", namespace="kube-system")
+            )
+        self.assertFalse(payload["ok"])
+        fake_api.patch_namespaced_deployment.assert_not_called()
+
+    @_with_settings()
+    def test_no_previous_revision_is_an_error(self):
+        dep = _fake_deployment_with_revision(revision=1)
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        fake_api.list_namespaced_replica_set.return_value.items = [
+            _fake_replicaset("web-abc", 1)
+        ]
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                rollback_deployment("web", namespace="default")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("no earlier revision", payload["error"])
+        fake_api.patch_namespaced_deployment.assert_not_called()
+
+    @_with_settings()
+    def test_rolls_back_to_newest_older_revision(self):
+        dep = _fake_deployment_with_revision(revision=3)
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.return_value = dep
+        fake_api.list_namespaced_replica_set.return_value.items = [
+            _fake_replicaset("web-old", 1),
+            _fake_replicaset("web-prev", 2),
+            _fake_replicaset("web-current", 3),
+            # Belongs to another deployment: must be ignored.
+            _fake_replicaset("other-xyz", 2, owner_uid="other-dep"),
+        ]
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                rollback_deployment("web", namespace="default")
+            )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["revision_before"], 3)
+        self.assertEqual(payload["revision_after"], 2)
+        body = fake_api.patch_namespaced_deployment.call_args[0][2]
+        template = body["spec"]["template"]
+        image = template["spec"]["containers"][0]["image"]
+        self.assertEqual(image, "registry/web:1.0.2")
+
+    @_with_settings()
+    def test_api_failure_becomes_error_envelope(self):
+        from kubernetes.client import ApiException
+
+        fake_api = MagicMock()
+        fake_api.read_namespaced_deployment.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                rollback_deployment("web", namespace="default")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("404", payload["error"])
 
 
 if __name__ == "__main__":

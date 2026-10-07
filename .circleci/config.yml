@@ -1,0 +1,52 @@
+# CircleCI pipeline for KubePilot.
+# What it does: installs dependencies, runs the pytest suite, and builds the Docker image
+# on every push. Written as a learning config — each section is explained in the crash course.
+version: 2.1
+
+orbs:
+  python: circleci/python@2.1.1
+
+jobs:
+  # Job 1: install deps and run the test suite
+  build-and-test:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      # Restore pip cache so reinstalls are fast
+      - restore_cache:
+          keys:
+            - pip-deps-{{ checksum "requirements-dev.txt" }}
+      - run:
+          name: Install dependencies
+          command: |
+            pip install -r requirements-dev.txt
+            pip install -e .
+      # Save pip cache for the next run
+      - save_cache:
+          paths:
+            - ~/.cache/pip
+          key: pip-deps-{{ checksum "requirements-dev.txt" }}
+      - run:
+          name: Run test suite
+          command: pytest -v
+
+  # Job 2: verify the Docker image still builds
+  docker-build:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      # CircleCI's Docker executor can't run docker directly;
+      # this provisions a remote Docker engine for the job.
+      - setup_remote_docker:
+          version: 20.10.14
+      - run:
+          name: Build Docker image
+          command: docker build -t kubepilot:ci .
+
+workflows:
+  ci:
+    jobs:
+      - build-and-test
+      - docker-build

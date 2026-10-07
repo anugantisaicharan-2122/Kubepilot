@@ -39,7 +39,7 @@ KubePilot is a small, opinionated answer to that:
                               ┌─────────────┴─────────────┐
                               │ config.py  (env settings) │
                               │ k8s.py     (lazy client)  │
-                              │ server.py  (6 MCP tools)  │
+                              │ server.py  (9 MCP tools)  │
                               └───────────────────────────┘
 ```
 
@@ -57,6 +57,9 @@ KubePilot is a small, opinionated answer to that:
 | `list_deployments` | read-only | Deployments with desired vs ready/updated/available replicas and images |
 | `get_events` | read-only | Recent cluster events, newest first — scheduling, image-pull, probe failures |
 | `describe_resource` | read-only | Full manifest (JSON) of a pod, deployment, service, configmap, namespace or node |
+| `rollout_status` | read-only | Rollout progress: updated/ready/available vs desired replicas, conditions, and a `complete` / `in_progress` / `stalled` verdict |
+| `restart_deployment` | **mutating** | `kubectl rollout restart` equivalent: re-creates pods via the `restartedAt` pod-template annotation |
+| `rollback_deployment` | **mutating** | `kubectl rollout undo` equivalent: restores the pod template from the newest older ReplicaSet revision |
 | `scale_deployment` | **mutating** | Change a deployment's replica count; returns before/after counts |
 
 Each tool carries a plain-English description so agents can discover when
@@ -173,7 +176,7 @@ python -m compileall -q src/      # syntax check
 
 ## Roadmap
 
-- [ ] Rollout controls: `restart_deployment`, `rollback_deployment`
+- [x] Rollout controls: `restart_deployment`, `rollout_status`, `rollback_deployment`
 - [ ] `port_forward` helper for local debugging sessions
 - [ ] Prometheus query tool for correlating metrics with events
 - [ ] Policy hooks (e.g. require approval for prod mutations)
@@ -181,4 +184,16 @@ python -m compileall -q src/      # syntax check
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Proprietary — all rights reserved. You may view the code for evaluation
+purposes only; see [LICENSE](LICENSE). Please don't copy or reuse it
+without written permission.
+
+## A note on mutation safety
+
+Today, mutating tools are gated by two code-level guardrails:
+`KUBEPILOT_READ_ONLY=true` refuses every mutation, and
+`KUBEPILOT_ALLOWED_NAMESPACES` scopes the blast radius. The natural next
+step is a confirmation flow — e.g. `KUBEPILOT_MUTATION_CONFIRM=true`
+requiring the agent to present a plan and receive explicit user approval
+before `scale`, `restart` or `rollback` executes. Planned, not yet
+implemented; see the Roadmap.
