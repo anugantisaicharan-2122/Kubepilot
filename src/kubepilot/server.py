@@ -68,6 +68,16 @@ def _require_namespace(namespace: str) -> str | None:
     return None
 
 
+def _require_mutation_allowed() -> str | None:
+    """Return an error envelope when mutations are disabled by config."""
+    if settings.read_only:
+        return _err(
+            "refusing to mutate: server is running in read-only mode "
+            "(KUBEPILOT_READ_ONLY=true)"
+        )
+    return None
+
+
 def _api_error(exc: Exception) -> str:
     """Turn a Kubernetes (or unexpected) exception into an error envelope."""
     if isinstance(exc, k8s_client.ApiException):
@@ -172,13 +182,17 @@ def get_pod_logs(
     namespace: str = settings.default_namespace,
     container: str = "",
     tail_lines: int = 100,
+    previous: bool = False,
 ) -> str:
     """Fetch recent log lines for a pod's container.
 
     The fastest way to see why a pod is crash-looping or failing its
     probes. Omit `container` to use the pod's default container.
     `tail_lines` is capped by KUBEPILOT_MAX_LOG_LINES (default 200) so
-    responses stay small enough for an agent to digest.
+    responses stay small enough for an agent to digest. Set
+    `previous=true` to read the *previous* (crashed) instance of the
+    container — the standard way to find out why a container that is
+    currently restarting died.
     """
     if denied := _require_namespace(namespace):
         return denied
@@ -189,6 +203,7 @@ def get_pod_logs(
             namespace=namespace,
             container=container or None,
             tail_lines=tail_lines,
+            previous=previous,
         )
         return _ok(
             {
@@ -196,6 +211,7 @@ def get_pod_logs(
                 "namespace": namespace,
                 "container": container or "(default)",
                 "tail_lines": tail_lines,
+                "previous": previous,
                 "logs": logs or "",
             }
         )
@@ -420,11 +436,8 @@ def restart_deployment(
     but the spec itself is fine. Refused when the server runs with
     KUBEPILOT_READ_ONLY=true.
     """
-    if settings.read_only:
-        return _err(
-            "refusing to restart: server is running in read-only mode "
-            "(KUBEPILOT_READ_ONLY=true)"
-        )
+    if refused := _require_mutation_allowed():
+        return refused
     if denied := _require_namespace(namespace):
         return denied
     try:
@@ -476,11 +489,8 @@ def rollback_deployment(
     revision history itself.) Fails cleanly when there is no earlier
     revision. Refused when the server runs with KUBEPILOT_READ_ONLY=true.
     """
-    if settings.read_only:
-        return _err(
-            "refusing to roll back: server is running in read-only mode "
-            "(KUBEPILOT_READ_ONLY=true)"
-        )
+    if refused := _require_mutation_allowed():
+        return refused
     if denied := _require_namespace(namespace):
         return denied
     try:
@@ -536,11 +546,8 @@ def scale_deployment(
     KUBEPILOT_READ_ONLY=true. Returns replica counts before and after so
     the change can be confirmed.
     """
-    if settings.read_only:
-        return _err(
-            "refusing to scale: server is running in read-only mode "
-            "(KUBEPILOT_READ_ONLY=true)"
-        )
+    if refused := _require_mutation_allowed():
+        return refused
     if denied := _require_namespace(namespace):
         return denied
     if replicas < 0:

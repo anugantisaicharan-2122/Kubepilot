@@ -17,9 +17,12 @@ from kubepilot.config import Settings
 from kubepilot.server import (
     _age,
     _api_error,
+    _deployment_revision,
     _err,
     _event_time,
     _ok,
+    _previous_revision,
+    _require_mutation_allowed,
     _require_namespace,
     _summarize_deployment,
     _summarize_pod,
@@ -249,6 +252,30 @@ class TestGetPodLogs(unittest.TestCase):
         _, kwargs = fake_api.read_namespaced_pod_log.call_args
         self.assertEqual(kwargs["tail_lines"], 200)
         self.assertIsNone(kwargs["container"])
+
+    @_with_settings()
+    def test_tail_lines_floor_at_one(self):
+        fake_api = MagicMock()
+        fake_api.read_namespaced_pod_log.return_value = "line1"
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(
+                get_pod_logs("web-0", namespace="default", tail_lines=0)
+            )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["tail_lines"], 1)
+
+    @_with_settings()
+    def test_previous_container_logs_are_forwarded(self):
+        fake_api = MagicMock()
+        fake_api.read_namespaced_pod_log.return_value = "crash line"
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(
+                get_pod_logs("web-0", namespace="default", previous=True)
+            )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["previous"])
+        _, kwargs = fake_api.read_namespaced_pod_log.call_args
+        self.assertTrue(kwargs["previous"])
 
     @_with_settings()
     def test_container_is_forwarded(self):
@@ -740,6 +767,41 @@ class TestRollbackDeployment(unittest.TestCase):
             )
         self.assertFalse(payload["ok"])
         self.assertIn("404", payload["error"])
+
+
+class TestMutationGuard(unittest.TestCase):
+    @_with_settings()
+    def test_mutations_allowed_when_writable(self):
+        self.assertIsNone(_require_mutation_allowed())
+
+    @_with_settings(KUBEPILOT_READ_ONLY="true")
+    def test_mutations_refused_in_read_only(self):
+        payload = json.loads(_require_mutation_allowed())
+        self.assertFalse(payload["ok"])
+        self.assertIn("read-only", payload["error"])
+
+
+class TestRevisionHelpers(unittest.TestCase):
+    def test_missing_revision_annotation_is_zero(self):
+        dep = _fake_deployment()
+        dep.metadata.annotations = None
+        self.assertEqual(_deployment_revision(dep), 0)
+
+    def test_non_numeric_revision_annotation_is_zero(self):
+        dep = _fake_deployment()
+        dep.metadata.annotations = {
+            "deployment.kubernetes.io/revision": "bogus"
+        }
+        self.assertEqual(_deployment_revision(dep), 0)
+
+    def test_previous_revision_ignores_unowned_replicasets(self):
+        dep = _fake_deployment_with_revision(revision=3)
+        foreign = _fake_replicaset("other-xyz", 2, owner_uid="other-dep")
+        self.assertIsNone(_previous_revision(dep, [foreign]))
+
+    def test_previous_revision_none_without_history(self):
+        dep = _fake_deployment_with_revision(revision=1)
+        self.assertIsNone(_previous_revision(dep, []))
 
 
 if __name__ == "__main__":
