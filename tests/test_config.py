@@ -10,7 +10,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from kubepilot.config import Settings, _as_bool, _as_tuple
+from kubepilot.config import Settings, _as_bool, _as_int, _as_tuple
 
 
 class TestHelpers(unittest.TestCase):
@@ -23,6 +23,14 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(_as_bool("0"))
         self.assertFalse(_as_bool(None))
         self.assertTrue(_as_bool(None, default=True))
+
+    def test_as_int(self):
+        self.assertEqual(_as_int("50", 200), 50)
+        self.assertEqual(_as_int(" 12 ", 200), 12)
+        self.assertEqual(_as_int(None, 200), 200)
+        # Malformed input falls back instead of raising.
+        self.assertEqual(_as_int("abc", 200), 200)
+        self.assertEqual(_as_int("", 200), 200)
 
     def test_as_tuple(self):
         self.assertEqual(_as_tuple("a,b , c"), ("a", "b", "c"))
@@ -62,6 +70,20 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(s.log_level, "DEBUG")
         self.assertTrue(s.namespace_allowed("staging"))
         self.assertFalse(s.namespace_allowed("kube-system"))
+
+    def test_malformed_env_values_fall_back(self):
+        # A bad KUBEPILOT_MAX_LOG_LINES must not crash Settings construction.
+        with patch.dict(
+            os.environ,
+            {
+                "KUBEPILOT_MAX_LOG_LINES": "not-a-number",
+                "KUBEPILOT_DEFAULT_NAMESPACE": "   ",
+            },
+            clear=True,
+        ):
+            s = Settings()
+        self.assertEqual(s.max_log_lines, 200)
+        self.assertEqual(s.default_namespace, "default")
 
     def test_settings_are_immutable(self):
         with patch.dict(os.environ, {}, clear=True):

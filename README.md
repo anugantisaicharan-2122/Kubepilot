@@ -1,6 +1,10 @@
 # KubePilot
 
-![KubePilot — AI Agents for Kubernetes](assets/kubepilot-poster.webp)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+[![License](https://img.shields.io/badge/license-view--only-lightgrey)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-stdio-green)](https://modelcontextprotocol.io)
+
+![KubePilot — AI Agents for Kubernetes](media-generation-kubepilot-poster-0-72f53249-67fc-4ae0-931d-56a258f5e659.webp)
 
 A **Model Context Protocol (MCP) server** that exposes Kubernetes cluster
 operations as tools for AI agents — built with Python, the official
@@ -46,14 +50,14 @@ KubePilot is a small, opinionated answer to that:
 - `config.py` — all settings from environment variables (12-factor).
 - `k8s.py` — lazy `CoreV1Api` / `AppsV1Api` singletons; importing the
   package never needs a live cluster.
-- `server.py` — the six MCP tools plus the stdio entry point.
+- `server.py` — the nine MCP tools plus the stdio entry point.
 
 ## Tools
 
 | Tool | Kind | What it does |
 |---|---|---|
 | `list_pods` | read-only | List pods in a namespace, optional label selector; phase, readiness, restarts, age |
-| `get_pod_logs` | read-only | Tail a pod's container logs (capped line count) |
+| `get_pod_logs` | read-only | Tail a pod's container logs (capped line count); `previous=true` reads the previous crashed instance |
 | `list_deployments` | read-only | Deployments with desired vs ready/updated/available replicas and images |
 | `get_events` | read-only | Recent cluster events, newest first — scheduling, image-pull, probe failures |
 | `describe_resource` | read-only | Full manifest (JSON) of a pod, deployment, service, configmap, namespace or node |
@@ -177,6 +181,8 @@ python -m compileall -q src/      # syntax check
 ## Roadmap
 
 - [x] Rollout controls: `restart_deployment`, `rollout_status`, `rollback_deployment`
+- [x] Previous-container logs in `get_pod_logs` for crash-loop debugging
+- [x] Hardened env parsing (malformed `KUBEPILOT_MAX_LOG_LINES` no longer crashes startup)
 - [ ] `port_forward` helper for local debugging sessions
 - [ ] Prometheus query tool for correlating metrics with events
 - [ ] Policy hooks (e.g. require approval for prod mutations)

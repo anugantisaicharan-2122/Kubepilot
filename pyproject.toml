@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP server exposing Kubernetes operations as tools for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Proprietary — view-only evaluation license (see LICENSE)" }
 authors = [{ name = "Sai Charan Anuganti" }]
 dependencies = [
     "mcp>=2.0",

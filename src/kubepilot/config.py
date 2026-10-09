@@ -27,6 +27,21 @@ def _as_tuple(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def _as_int(value: str | None, default: int) -> int:
+    """Parse an integer environment variable, falling back on bad input.
+
+    A malformed value (e.g. ``KUBEPILOT_MAX_LOG_LINES=abc``) used to crash
+    the whole server at import time. Falling back to the default keeps
+    the server bootable with a single misconfigured variable.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime settings for the KubePilot MCP server."""
@@ -48,13 +63,17 @@ class Settings:
         default_factory=lambda: _as_bool(os.environ.get("KUBEPILOT_READ_ONLY"))
     )
     default_namespace: str = field(
-        default_factory=lambda: os.environ.get("KUBEPILOT_DEFAULT_NAMESPACE", "default")
+        default_factory=lambda: (
+            os.environ.get("KUBEPILOT_DEFAULT_NAMESPACE", "").strip() or "default"
+        )
     )
     log_level: str = field(
         default_factory=lambda: os.environ.get("KUBEPILOT_LOG_LEVEL", "INFO").upper()
     )
     max_log_lines: int = field(
-        default_factory=lambda: int(os.environ.get("KUBEPILOT_MAX_LOG_LINES", "200"))
+        default_factory=lambda: _as_int(
+            os.environ.get("KUBEPILOT_MAX_LOG_LINES"), 200
+        )
     )
 
     def namespace_allowed(self, namespace: str) -> bool:
