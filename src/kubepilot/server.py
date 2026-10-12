@@ -87,11 +87,20 @@ def _api_error(exc: Exception) -> str:
 
 
 def _age(created) -> str:
-    """Human-friendly age like '2d4h', '36m' or '45s'."""
+    """Human-friendly age like '2d4h', '36m' or '45s'.
+
+    Naive (timezone-less) timestamps are assumed to be UTC: some API
+    responses deserialize without tzinfo, and blowing up the whole
+    listing over one such timestamp is not acceptable. Timestamps in
+    the future — clock skew between the agent host and the API server —
+    are clamped to zero rather than reported as negative ages.
+    """
     if created is None:
         return "unknown"
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
     delta = datetime.now(timezone.utc) - created.astimezone(timezone.utc)
-    seconds = int(delta.total_seconds())
+    seconds = max(0, int(delta.total_seconds()))
     days, seconds = divmod(seconds, 86400)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
@@ -220,18 +229,25 @@ def get_pod_logs(
 
 
 @server.tool()
-def list_deployments(namespace: str = settings.default_namespace) -> str:
+def list_deployments(
+    namespace: str = settings.default_namespace, label_selector: str = ""
+) -> str:
     """List deployments in a namespace with replica and image status.
 
     Shows desired vs ready/updated/available replicas per deployment —
     the quickest way to spot a rollout that is stuck or degraded — plus
-    the container images each deployment is running.
+    the container images each deployment is running. Narrow results with
+    a Kubernetes label selector, e.g. "app=checkout,env=prod".
     """
     if denied := _require_namespace(namespace):
         return denied
     try:
         deps = (
-            k8s.apps_v1().list_namespaced_deployment(namespace=namespace).items
+            k8s.apps_v1()
+            .list_namespaced_deployment(
+                namespace=namespace, label_selector=label_selector or None
+            )
+            .items
         )
         return _ok(
             {

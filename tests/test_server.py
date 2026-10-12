@@ -122,6 +122,16 @@ class TestAge(unittest.TestCase):
         ts = datetime.now(timezone.utc) - timedelta(days=2, hours=4)
         self.assertEqual(_age(ts), "2d4h")
 
+    def test_naive_datetime_is_assumed_utc(self):
+        ts = (datetime.now(timezone.utc) - timedelta(minutes=36)).replace(
+            tzinfo=None
+        )
+        self.assertEqual(_age(ts), "36m")
+
+    def test_future_timestamp_is_clamped_to_zero(self):
+        ts = datetime.now(timezone.utc) + timedelta(seconds=30)
+        self.assertEqual(_age(ts), "0s")
+
 
 class TestSummaries(unittest.TestCase):
     def test_summarize_pod(self):
@@ -347,7 +357,20 @@ class TestListDeployments(unittest.TestCase):
         self.assertEqual(payload["deployments"][1]["name"], "api")
         self.assertEqual(payload["deployments"][1]["replicas"]["desired"], 1)
         fake_api.list_namespaced_deployment.assert_called_once_with(
-            namespace="default"
+            namespace="default", label_selector=None
+        )
+
+    @_with_settings()
+    def test_passes_label_selector_through(self):
+        fake_api = MagicMock()
+        fake_api.list_namespaced_deployment.return_value.items = []
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                list_deployments(namespace="default", label_selector="app=web")
+            )
+        self.assertTrue(payload["ok"])
+        fake_api.list_namespaced_deployment.assert_called_once_with(
+            namespace="default", label_selector="app=web"
         )
 
     @_with_settings(KUBEPILOT_ALLOWED_NAMESPACES="default")
