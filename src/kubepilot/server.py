@@ -86,6 +86,26 @@ def _api_error(exc: Exception) -> str:
     return _err(f"{type(exc).__name__}: {exc}")
 
 
+def _coerce_int(raw, name: str) -> tuple[int | None, str | None]:
+    """Coerce a tool argument to an int.
+
+    Returns ``(value, None)`` on success, or ``(None, error_envelope)``
+    when the value is not a valid integer — malformed agent input then
+    surfaces as the standard JSON error instead of an unhandled
+    exception. ``True``/``False`` and non-integral floats are rejected
+    so they can never silently become a replica count or log-line limit.
+    """
+    if isinstance(raw, bool):
+        return None, _err(f"'{name}' must be an integer, got {raw!r}")
+    if isinstance(raw, float) and not raw.is_integer():
+        return None, _err(f"'{name}' must be an integer, got {raw!r}")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, _err(f"'{name}' must be an integer, got {raw!r}")
+    return value, None
+
+
 def _age(created) -> str:
     """Human-friendly age like '2d4h', '36m' or '45s'.
 
@@ -205,7 +225,10 @@ def get_pod_logs(
     """
     if denied := _require_namespace(namespace):
         return denied
-    tail_lines = max(1, min(int(tail_lines), settings.max_log_lines))
+    tail_lines, coerced = _coerce_int(tail_lines, "tail_lines")
+    if coerced is not None:
+        return coerced
+    tail_lines = max(1, min(tail_lines, settings.max_log_lines))
     try:
         logs = k8s.core_v1().read_namespaced_pod_log(
             name=pod_name,
@@ -271,7 +294,10 @@ def get_events(namespace: str = settings.default_namespace, limit: int = 50) -> 
     """
     if denied := _require_namespace(namespace):
         return denied
-    limit = max(1, min(int(limit), 200))
+    limit, coerced = _coerce_int(limit, "limit")
+    if coerced is not None:
+        return coerced
+    limit = max(1, min(limit, 200))
     try:
         events = k8s.core_v1().list_namespaced_event(namespace=namespace).items
         events.sort(key=_event_time, reverse=True)
@@ -566,6 +592,9 @@ def scale_deployment(
         return refused
     if denied := _require_namespace(namespace):
         return denied
+    replicas, coerced = _coerce_int(replicas, "replicas")
+    if coerced is not None:
+        return coerced
     if replicas < 0:
         return _err("replicas must be 0 or greater")
     try:

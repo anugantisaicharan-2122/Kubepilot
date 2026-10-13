@@ -17,6 +17,7 @@ from kubepilot.config import Settings
 from kubepilot.server import (
     _age,
     _api_error,
+    _coerce_int,
     _deployment_revision,
     _err,
     _event_time,
@@ -100,6 +101,47 @@ class TestEnvelopes(unittest.TestCase):
         payload = json.loads(_err("boom"))
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "boom")
+
+
+class TestCoerceInt(unittest.TestCase):
+    def test_plain_int_passes_through(self):
+        value, error = _coerce_int(5, "replicas")
+        self.assertEqual(value, 5)
+        self.assertIsNone(error)
+
+    def test_numeric_string_is_accepted(self):
+        value, error = _coerce_int("5", "replicas")
+        self.assertEqual(value, 5)
+        self.assertIsNone(error)
+
+    def test_integral_float_is_accepted(self):
+        value, error = _coerce_int(5.0, "replicas")
+        self.assertEqual(value, 5)
+        self.assertIsNone(error)
+
+    def test_garbage_string_becomes_error_envelope(self):
+        value, error = _coerce_int("abc", "tail_lines")
+        self.assertIsNone(value)
+        payload = json.loads(error)
+        self.assertFalse(payload["ok"])
+        self.assertIn("tail_lines", payload["error"])
+
+    def test_none_becomes_error_envelope(self):
+        value, error = _coerce_int(None, "limit")
+        self.assertIsNone(value)
+        self.assertFalse(json.loads(error)["ok"])
+
+    def test_bool_is_rejected(self):
+        value, error = _coerce_int(True, "replicas")
+        self.assertIsNone(value)
+        payload = json.loads(error)
+        self.assertFalse(payload["ok"])
+        self.assertIn("must be an integer", payload["error"])
+
+    def test_non_integral_float_is_rejected(self):
+        value, error = _coerce_int(3.5, "replicas")
+        self.assertIsNone(value)
+        self.assertFalse(json.loads(error)["ok"])
 
 
 class TestAge(unittest.TestCase):
@@ -301,6 +343,17 @@ class TestGetPodLogs(unittest.TestCase):
         _, kwargs = fake_api.read_namespaced_pod_log.call_args
         self.assertEqual(kwargs["container"], "sidecar")
 
+    @_with_settings()
+    def test_non_integer_tail_lines_become_error_envelope(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(
+                get_pod_logs("web-0", namespace="default", tail_lines="abc")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("tail_lines", payload["error"])
+        fake_api.read_namespaced_pod_log.assert_not_called()
+
 
 class TestScaleDeployment(unittest.TestCase):
     @_with_settings(KUBEPILOT_READ_ONLY="true")
@@ -324,6 +377,17 @@ class TestScaleDeployment(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("0 or greater", payload["error"])
         fake_api.patch_namespaced_deployment_scale.assert_not_called()
+
+    @_with_settings()
+    def test_non_integer_replicas_become_error_envelope(self):
+        fake_api = MagicMock()
+        with patch.object(server_mod.k8s, "apps_v1", return_value=fake_api):
+            payload = json.loads(
+                scale_deployment("web", namespace="default", replicas="many")
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("replicas", payload["error"])
+        fake_api.read_namespaced_deployment_scale.assert_not_called()
 
     @_with_settings()
     def test_successful_scale_reports_before_and_after(self):
