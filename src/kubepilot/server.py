@@ -163,11 +163,27 @@ def _summarize_deployment(dep) -> dict:
 
 
 def _event_time(event):
+    """Newest timestamp of an event, normalized to tz-aware UTC.
+
+    Naive (timezone-less) timestamps are assumed to be UTC — the same
+    policy as ``_age``. Without this, sorting events in ``get_events``
+    crashes with ``TypeError: can't compare offset-naive and offset-aware
+    datetimes`` when the API (or a mixed-version client) returns some
+    events with tzinfo and others without, turning one odd timestamp
+    into a failure of the whole listing.
+    """
     for attr in ("last_timestamp", "event_time"):
         ts = getattr(event, attr, None)
         if ts:
-            return ts
-    return event.metadata.creation_timestamp
+            return ts if ts.tzinfo is not None else ts.replace(
+                tzinfo=timezone.utc
+            )
+    created = event.metadata.creation_timestamp
+    return (
+        created
+        if created is None or created.tzinfo is not None
+        else created.replace(tzinfo=timezone.utc)
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -491,6 +491,22 @@ class TestEventTime(unittest.TestCase):
             _event_time(event), event.metadata.creation_timestamp
         )
 
+    def test_naive_last_timestamp_is_assumed_utc(self):
+        event = _fake_event("web-0", 5)
+        naive = event.last_timestamp.replace(tzinfo=None)
+        event.last_timestamp = naive
+        result = _event_time(event)
+        self.assertEqual(result, naive.replace(tzinfo=timezone.utc))
+        self.assertEqual(result.tzinfo, timezone.utc)
+
+    def test_naive_creation_timestamp_is_assumed_utc(self):
+        event = _fake_event("web-0", 5, use_last_ts=False)
+        naive = event.metadata.creation_timestamp.replace(tzinfo=None)
+        event.metadata.creation_timestamp = naive
+        result = _event_time(event)
+        self.assertEqual(result, naive.replace(tzinfo=timezone.utc))
+        self.assertEqual(result.tzinfo, timezone.utc)
+
 
 class TestGetEvents(unittest.TestCase):
     @_with_settings()
@@ -558,6 +574,31 @@ class TestGetEvents(unittest.TestCase):
             payload = json.loads(get_events(namespace="default"))
         self.assertFalse(payload["ok"])
         self.assertIn("403", payload["error"])
+
+    @_with_settings()
+    def test_mixed_naive_and_aware_timestamps_do_not_fail_listing(self):
+        # Some API responses deserialize event timestamps without tzinfo
+        # while others carry it; sorting must not blow up the listing.
+        aware_event = _fake_event("new", minutes_ago=2)
+        naive_event = _fake_event("old", minutes_ago=60)
+        naive_event.last_timestamp = naive_event.last_timestamp.replace(
+            tzinfo=None
+        )
+        naive_event.metadata.creation_timestamp = (
+            naive_event.metadata.creation_timestamp.replace(tzinfo=None)
+        )
+        fake_api = MagicMock()
+        fake_api.list_namespaced_event.return_value.items = [
+            naive_event,
+            aware_event,
+        ]
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [e["object"] for e in payload["events"]],
+            ["Pod/new", "Pod/old"],
+        )
 
 
 class TestDescribeResource(unittest.TestCase):
