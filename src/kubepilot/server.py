@@ -171,6 +171,9 @@ def _event_time(event):
     datetimes`` when the API (or a mixed-version client) returns some
     events with tzinfo and others without, turning one odd timestamp
     into a failure of the whole listing.
+
+    Returns ``None`` when the event carries no timestamp at all; callers
+    must tolerate that (see ``get_events``).
     """
     for attr in ("last_timestamp", "event_time"):
         ts = getattr(event, attr, None)
@@ -184,6 +187,12 @@ def _event_time(event):
         if created is None or created.tzinfo is not None
         else created.replace(tzinfo=timezone.utc)
     )
+
+
+# Sort fallback for events that carry no timestamp at all: they sort as
+# oldest, so one timestamp-less event can never crash the newest-first
+# ordering in get_events with a TypeError comparing None to datetime.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +325,15 @@ def get_events(namespace: str = settings.default_namespace, limit: int = 50) -> 
     limit = max(1, min(limit, 200))
     try:
         events = k8s.core_v1().list_namespaced_event(namespace=namespace).items
-        events.sort(key=_event_time, reverse=True)
+        # Precompute each event's timestamp once: _event_time returns None
+        # for timestamp-less events, and sorting None against datetimes
+        # (or calling .isoformat() on it) would fail the whole listing.
+        stamped = [(_event_time(e), e) for e in events]
+        stamped.sort(key=lambda pair: pair[0] or _EPOCH, reverse=True)
         return _ok(
             {
                 "namespace": namespace,
-                "count": min(len(events), limit),
+                "count": min(len(stamped), limit),
                 "events": [
                     {
                         "type": e.type,
@@ -328,9 +341,11 @@ def get_events(namespace: str = settings.default_namespace, limit: int = 50) -> 
                         "object": f"{e.involved_object.kind}/{e.involved_object.name}",
                         "message": (e.message or "")[:300],
                         "count": e.count,
-                        "last_seen": _event_time(e).isoformat(),
+                        "last_seen": (
+                            ts.isoformat() if ts is not None else "unknown"
+                        ),
                     }
-                    for e in events[:limit]
+                    for ts, e in stamped[:limit]
                 ],
             }
         )

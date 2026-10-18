@@ -507,6 +507,11 @@ class TestEventTime(unittest.TestCase):
         self.assertEqual(result, naive.replace(tzinfo=timezone.utc))
         self.assertEqual(result.tzinfo, timezone.utc)
 
+    def test_returns_none_when_no_timestamps(self):
+        event = _fake_event("web-0", 5, use_last_ts=False)
+        event.metadata.creation_timestamp = None
+        self.assertIsNone(_event_time(event))
+
 
 class TestGetEvents(unittest.TestCase):
     @_with_settings()
@@ -599,6 +604,29 @@ class TestGetEvents(unittest.TestCase):
             [e["object"] for e in payload["events"]],
             ["Pod/new", "Pod/old"],
         )
+
+    @_with_settings()
+    def test_timestamp_less_event_does_not_fail_listing(self):
+        # An event with no timestamp at all must not kill the listing:
+        # it sorts oldest and reports last_seen as "unknown".
+        good_event = _fake_event("new", minutes_ago=2)
+        timeless_event = _fake_event("old", minutes_ago=60, use_last_ts=False)
+        timeless_event.metadata.creation_timestamp = None
+        fake_api = MagicMock()
+        fake_api.list_namespaced_event.return_value.items = [
+            timeless_event,
+            good_event,
+        ]
+        with patch.object(server_mod.k8s, "core_v1", return_value=fake_api):
+            payload = json.loads(get_events(namespace="default"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(
+            [e["object"] for e in payload["events"]],
+            ["Pod/new", "Pod/old"],
+        )
+        self.assertEqual(payload["events"][1]["last_seen"], "unknown")
+        self.assertTrue(payload["events"][0]["last_seen"] != "unknown")
 
 
 class TestDescribeResource(unittest.TestCase):
