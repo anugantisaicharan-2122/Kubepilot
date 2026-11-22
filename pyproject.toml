@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 kubepilot = "kubepilot.server:main"
+kubepilot-dashboard = "kubepilot.dashboard:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
