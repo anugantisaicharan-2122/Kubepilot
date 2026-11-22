@@ -51,6 +51,11 @@ KubePilot is a small, opinionated answer to that:
 - `k8s.py` — lazy `CoreV1Api` / `AppsV1Api` singletons; importing the
   package never needs a live cluster.
 - `server.py` — the nine MCP tools plus the stdio entry point.
+- `dashboard.py` — the Pro web dashboard: HTTP server + JSON API
+  (live mode via the tools above, demo mode via `demo_data.py`).
+- `dashboard_ui.py` — the single-page app (dark pro theme, no
+  external assets).
+- `demo_data.py` — deterministic simulated cluster for demo mode.
 
 ## Tools
 
@@ -122,6 +127,54 @@ docker run -i --rm \
   kubepilot:latest
 ```
 
+## Web dashboard (KubePilot Pro)
+
+A dark, professional web dashboard over the same data the agent sees —
+live cluster data with auto-refresh, plus a demo mode that works with
+no cluster at all.
+
+```bash
+kubepilot-dashboard                 # auto-detect: live if a cluster is reachable, else demo
+kubepilot-dashboard --demo          # force demo mode (simulated data)
+kubepilot-dashboard --port 8000     # then open http://127.0.0.1:8000
+```
+
+- **Overview** — stat cards, pods-by-status totals, CPU/memory
+  request totals with per-namespace bars, "needs attention" list.
+- **Pods** — search, status + label filters, server-side pagination
+  (10/20/50/100 per page), JSON/CSV export, per-pod Logs and Describe.
+- **Deployments** — multi-select + **bulk scale / restart / rollback**
+  with a per-item success/failure report, rollout verdicts, replica
+  bars, rollout **history**, Describe.
+- **Logs** — pod picker, container, tail lines, previous-instance
+  toggle, follow mode.
+- **Events** — timeline, type filter, search, pagination, export.
+- **Tutorial** — guided tour with live Try-it buttons.
+- **Search** — fast search across pods, deployments and events from
+  the header.
+- **Demo mode** — when no cluster is reachable the dashboard serves
+  realistic simulated data (94 pods, 15 deployments, 60 events across
+  4 namespaces), clearly labeled, with working bulk actions against
+  the simulation. Set `KUBEPILOT_KUBECONFIG` (or
+  `KUBEPILOT_IN_CLUSTER=true`) and restart to switch to LIVE.
+- **API** — every page is backed by a JSON API under `/api/`
+  (`/api/pods`, `/api/deployments`, `/api/events`, `/api/logs`,
+  `/api/rollout-history`, `/api/resources`, `/api/search`,
+  `/api/export`, `/api/bulk/scale|restart|rollback`, …). All responses
+  use the same `{"ok": true, ...}` / `{"ok": false, "error": "..."}`
+  envelope as the MCP tools.
+
+## Tutorial
+
+New here? Start with **[TUTORIAL.md](TUTORIAL.md)** — how KubePilot
+works (MCP server, agent calls tools, JSON envelope, read-only
+guardrail), what all 9 tools do with examples, a guided incident
+walkthrough (find the OOMKilled pod), where it can be used (platform
+engineering, DevOps/SRE, SaaS, fintech, healthcare, e-commerce,
+media/streaming, telecom, gaming), and how useful it is. The same
+guide lives in the dashboard's Tutorial tab, with Try-it buttons that
+run the real API calls.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -174,12 +227,13 @@ docker run -i --rm \
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests/ -q        # unit tests (no cluster needed)
+python -m pytest tests/ -q        # 147 unit tests (no cluster needed)
 python -m compileall -q src/      # syntax check
 ```
 
 ## Roadmap
 
+- [x] Web dashboard (Pro): live + demo modes, bulk actions, export, tutorial
 - [x] Rollout controls: `restart_deployment`, `rollout_status`, `rollback_deployment`
 - [x] Previous-container logs in `get_pod_logs` for crash-loop debugging
 - [x] Hardened env parsing (malformed `KUBEPILOT_MAX_LOG_LINES` no longer crashes startup)
