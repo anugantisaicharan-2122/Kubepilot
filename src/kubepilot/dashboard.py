@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import io
 import json
 import logging
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -877,6 +879,24 @@ class Dashboard:
         self._executor.shutdown(wait=False)
 
 
+def _port_number(value: str) -> int:
+    """``argparse`` type for ``--port``: a TCP port number (0-65535).
+
+    Without this, ``--port 99999`` died deep inside ``socket.bind`` with
+    an ``OverflowError`` traceback; now argparse rejects it up front
+    with a one-line usage error (exit code 2).
+    """
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port: {value!r}")
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"invalid port {port}: must be between 0 and 65535"
+        )
+    return port
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the KubePilot Pro dashboard: ``kubepilot-dashboard``."""
     parser = argparse.ArgumentParser(
@@ -884,7 +904,7 @@ def main(argv: list[str] | None = None) -> None:
         description="KubePilot Pro — web dashboard for Kubernetes (live or demo mode).",
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8000, help="port (default 8000)")
+    parser.add_argument("--port", type=_port_number, default=8000, help="port (default 8000)")
     parser.add_argument("--demo", action="store_true", help="force demo mode (simulated data)")
     parser.add_argument("--live", action="store_true", help="force live mode (fail if no cluster)")
     parser.add_argument(
@@ -898,4 +918,27 @@ def main(argv: list[str] | None = None) -> None:
     if args.demo and args.live:
         parser.error("--demo and --live are mutually exclusive")
     demo = True if args.demo else False if args.live else None
-    Dashboard(host=args.host, port=args.port, demo=demo).serve_forever()
+    dashboard = Dashboard(host=args.host, port=args.port, demo=demo)
+    try:
+        dashboard.serve_forever()
+    except OSError as exc:
+        # A failed bind (port in use, bad host, no permission) used to
+        # surface as a raw traceback from socketserver; report it as a
+        # one-line startup error instead and exit non-zero.
+        dashboard._executor.shutdown(wait=False)
+        detail = exc.strerror or str(exc)
+        hint = (
+            " (is another dashboard already running on this port?)"
+            if exc.errno == errno.EADDRINUSE
+            else ""
+        )
+        print(
+            f"kubepilot-dashboard: error: cannot listen on "
+            f"{args.host}:{args.port}: {detail}{hint}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -596,6 +596,50 @@ class TestDashboardCli(unittest.TestCase):
             main(["--demo", "--live"])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_invalid_port_rejected_with_usage_error(self):
+        """--port outside 0-65535 is an argparse error, not a bind traceback."""
+        from kubepilot.dashboard import main
+
+        for bad in ("99999", "-1", "abc"):
+            with self.subTest(port=bad), self.assertRaises(SystemExit) as ctx:
+                main(["--port", bad])
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_bind_failure_exits_cleanly_with_one_line_error(self):
+        """Port already in use -> exit 1 with a plain message, no traceback."""
+        import errno
+        import io
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+
+        import kubepilot.dashboard as dash
+        from kubepilot.dashboard import main
+
+        err = io.StringIO()
+        with patch.object(
+            dash, "ThreadingHTTPServer",
+            side_effect=OSError(errno.EADDRINUSE, "Address already in use"),
+        ), redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            main(["--demo", "--port", "8899"])
+        self.assertEqual(ctx.exception.code, 1)
+        message = err.getvalue()
+        self.assertIn("cannot listen on 127.0.0.1:8899", message)
+        self.assertIn("Address already in use", message)
+        self.assertIn("already running", message)
+        self.assertNotIn("Traceback", message)
+
+    def test_module_entry_point_runs_the_cli(self):
+        """python -m kubepilot.dashboard works (it used to exit silently)."""
+        import subprocess
+        import sys
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "kubepilot.dashboard", "--help"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("kubepilot-dashboard", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
