@@ -114,16 +114,29 @@ def _deployment_verdict(dep: dict) -> str:
 
 
 def _match_label_selector(pod: dict, selector: str) -> bool:
-    """True when a pod's labels satisfy a ``k=v,k=v`` selector (demo mode)."""
+    """True when a pod's labels satisfy an equality-based selector (demo mode).
+
+    Supports the Kubernetes equality-based operators the dashboard's
+    filter box accepts: ``k=v`` (equal), ``k!=v`` (not equal — also
+    matches when the label is absent, as in Kubernetes) and bare ``k``
+    (label exists). Previously only ``k=v`` was handled: ``k!=v`` was
+    silently mis-parsed (``partition("=")`` made the key ``"k!"``) so it
+    matched nothing, and a bare key always failed.
+    """
     labels = pod.get("labels") or {}
     for part in selector.split(","):
         part = part.strip()
         if not part:
             continue
-        if "=" not in part:
-            return False
-        key, _, value = part.partition("=")
-        if labels.get(key.strip()) != value.strip():
+        if "!=" in part:
+            key, _, value = part.partition("!=")
+            if labels.get(key.strip()) == value.strip():
+                return False
+        elif "=" in part:
+            key, _, value = part.partition("=")
+            if labels.get(key.strip()) != value.strip():
+                return False
+        elif part not in labels:
             return False
     return True
 

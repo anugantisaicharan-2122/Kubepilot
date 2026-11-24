@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 from kubepilot.config import Settings
-from kubepilot.dashboard import Dashboard
+from kubepilot.dashboard import Dashboard, _match_label_selector
 from kubepilot.demo_data import DemoStore
 
 
@@ -229,6 +229,17 @@ class TestPods(DashboardTestCase):
         multi = self.get_json(
             "/api/pods?label_selector=app%3Dcheckout-api%2Cenv%3Dprod&page_size=100")
         self.assertTrue(all(p["namespace"] == "prod" for p in multi["items"]))
+        not_equal = self.get_json(
+            "/api/pods?label_selector=app%21%3Dcheckout-api&page_size=100")
+        self.assertTrue(not_equal["total"] > 0)
+        self.assertTrue(all(p["labels"]["app"] != "checkout-api"
+                            for p in not_equal["items"]))
+        self.assertEqual(
+            not_equal["total"] + data["total"], len(self.store.pods))
+        exists = self.get_json("/api/pods?label_selector=app&page_size=100")
+        self.assertEqual(exists["total"], len(self.store.pods))
+        missing = self.get_json("/api/pods?label_selector=tier&page_size=100")
+        self.assertEqual(missing["total"], 0)
 
     def test_pod_shape(self):
         data = self.get_json("/api/pods?page_size=1")
@@ -237,6 +248,36 @@ class TestPods(DashboardTestCase):
                       "restarts", "age", "node", "labels", "cpu_request",
                       "memory_request"):
             self.assertIn(field, pod, field)
+
+
+class TestLabelSelector(unittest.TestCase):
+    """Unit tests for _match_label_selector (demo-mode pod filtering)."""
+
+    POD = {"labels": {"app": "web", "env": "prod", "version": "v1=beta"}}
+
+    def test_equality(self):
+        self.assertTrue(_match_label_selector(self.POD, "app=web"))
+        self.assertFalse(_match_label_selector(self.POD, "app=api"))
+        self.assertFalse(_match_label_selector(self.POD, "tier=web"))
+
+    def test_not_equal(self):
+        # Different value matches; same value does not; an absent label
+        # also matches (Kubernetes != semantics).
+        self.assertTrue(_match_label_selector(self.POD, "app!=api"))
+        self.assertFalse(_match_label_selector(self.POD, "app!=web"))
+        self.assertTrue(_match_label_selector(self.POD, "tier!=web"))
+
+    def test_existence(self):
+        self.assertTrue(_match_label_selector(self.POD, "app"))
+        self.assertFalse(_match_label_selector(self.POD, "tier"))
+
+    def test_combined_and_values_with_equals(self):
+        self.assertTrue(
+            _match_label_selector(self.POD, "app=web, env!=staging"))
+        self.assertFalse(
+            _match_label_selector(self.POD, "app=web, env!=prod"))
+        self.assertTrue(_match_label_selector(self.POD, "version=v1=beta"))
+        self.assertTrue(_match_label_selector(self.POD, "app=web, , env=prod"))
 
 
 class TestDeploymentsAndEvents(DashboardTestCase):
